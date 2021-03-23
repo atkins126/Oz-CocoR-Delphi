@@ -1,0 +1,211 @@
+COMPILER Taste
+
+CHARACTERS
+  letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".
+  digit = "0123456789".
+  cr  = '\r'.
+  lf  = '\n'.
+  tab = '\t'.
+
+TOKENS
+  ident  = letter {letter | digit}.
+  number = digit {digit}.
+
+COMMENTS FROM "/*" TO "*/" NESTED
+COMMENTS FROM "//" TO lf
+
+IGNORE cr + lf + tab
+
+PRODUCTIONS
+
+AddOp<var op: TOp>
+=                            (. op := TOp.ADD; .)
+( '+'
+| '-'                        (. op := TOp.SUB; .)
+).
+
+Expr<var typ: TType>         (. var
+                                  typ1: TType;
+                                  op: TOp; .)
+= SimExpr<typ>
+[ RelOp<op>
+SimExpr<typ1>                (. if typ <> typ1 then SemErr('incompatible types');
+                                gen.Emit(op);
+                                typ := TType.bool; .)
+].
+
+Factor<var typ: TType>       (. var
+                                  n: Integer;
+                                  obj: TObj;
+                                  name: string; .)
+=                            (. typ := TType.undef; .)
+( Ident<name>                (. obj := tab.Find(name);
+                                typ := obj.typ;
+                                if obj.kind = variable then
+                                begin
+                                  if obj.level = 0 then
+                                    gen.Emit(TOp.LOADG, obj.adr)
+                                  else
+                                    gen.Emit(TOp.LOAD, obj.adr);
+                                end else
+                                  SemErr('variable expected'); .)
+| number                     (. n := StrToInt(t.val);
+                                gen.Emit(TOp.opCONST, n);
+                                typ := TType.int; .)
+| '-' Factor<typ>            (. if typ <> TType.int then
+                                begin
+                                  SemErr('TType.int type expected');
+                                  typ := TType.int;
+                                end;
+                                gen.Emit(TOp.NEG); .)
+| "true"                     (. gen.Emit(TOp.opCONST, 1);
+                                typ := TType.bool; .)
+| "false"                    (. gen.Emit(TOp.opCONST, 0);
+                                typ := TType.bool; .)
+).
+
+Ident<var name: string>
+= ident                      (. name := t.val; .)
+.
+
+MulOp<var op: TOp>
+=                            (. op := TOp.MUL; .)
+  ( '*'
+  | '/'                      (. op := TOp.opDIV; .)
+  )
+.
+
+ProcDecl                     (. var
+                                  name: string;
+                                  obj: TObj;
+                                  adr: Integer; .)
+=
+"procedure" Ident<name>      (. obj := tab.NewObj(name, proc, TType.undef);
+                                obj.adr := gen.pc;
+                                if name = 'Main' then
+                                  gen.progStart := gen.pc;
+                                tab.OpenScope; .)
+  '(' ')'
+  '{'                        (. gen.Emit(TOp.ENTER, 0);
+                                adr := gen.pc - 2; .)
+  { VarDecl | Stat }
+  '}'                        (. gen.Emit(TOp.LEAVE);
+                                gen.Emit(TOp.RET);
+                                gen.Patch(adr, tab.topScope.nextAdr);
+                                tab.CloseScope; .).
+
+RelOp<var op: TOp>
+=                            (. op := TOp.EQU; .)
+  ( "=="
+  | '<'                      (. op := TOp.LSS; .)
+  | '>'                      (. op := TOp.GTR; .)
+  ).
+
+SimExpr<var typ: TType>      (. var
+                                  typ1: TType;
+                                  op: TOp; .)
+=
+Term<typ>
+{ AddOp<op>
+  Term<typ1>                 (. if (typ <> TType.int) or (typ1 <> TType.int) then
+                                  SemErr('TType.int type expected');
+                                gen.Emit(op); .)
+}.
+
+Stat                         (. var
+                                  typ: TType;
+                                  name: string;
+                                  obj: TObj;
+                                  adr, adr2, loopstart: Integer; .)
+=
+Ident<name>                  (. obj := tab.Find(name); .)
+( "="                        (. if obj.kind <> variable then
+                                  SemErr('cannot assign to procedure'); .)
+Expr<typ> ';'                (. if typ <> obj.typ then
+                                  SemErr('incompatible types');
+                                if obj.level = 0 then
+                                  gen.Emit(TOp.STOG, obj.adr)
+                                else
+                                  gen.Emit(TOp.STO, obj.adr); .)
+| '(' ')' ';'                (. if obj.kind <> proc then
+                                  SemErr('object is not a procedure');
+                                gen.Emit(TOp.CALL, obj.adr); .)
+)
+| "if"
+  '(' Expr<typ> ')'          (. if typ <> TType.bool then
+                                  SemErr('TType.bool type expected');
+                                gen.Emit(TOp.FJMP, 0);
+                                adr := gen.pc - 2; .)
+Stat
+[ "else"                     (. gen.Emit(TOp.JMP, 0);
+                                adr2 := gen.pc - 2;
+                                gen.Patch(adr, gen.pc);
+                                adr := adr2; .)
+  Stat ]                     (. gen.Patch(adr, gen.pc); .)
+
+| "while"                    (. loopstart := gen.pc; .)
+  '(' Expr<typ> ')'          (. if typ <> TType.bool then
+                                  SemErr('TType.bool type expected');
+                                gen.Emit(TOp.FJMP, 0);
+                                adr := gen.pc - 2; .)
+  Stat                       (. gen.Emit(TOp.JMP, loopstart);
+                                gen.Patch(adr, gen.pc); .)
+
+| "read"
+  Ident<name> ';'            (. obj := tab.Find(name);
+                                if obj.typ <> TType.int then
+                                  SemErr('integer type expected');
+                                gen.Emit(TOp.READ);
+                                if obj.level = 0 then
+                                  gen.Emit(TOp.STOG, obj.adr)
+                                else
+                                  gen.Emit(TOp.STO, obj.adr); .)
+
+| "write"
+  Expr<typ> ';'               (. if typ <> TType.int then
+                                   SemErr('integer type expected');
+                                 gen.Emit(TOp.WRITE); .)
+
+| '{' { Stat | VarDecl } '}'
+.
+
+Taste                        (. var
+                                  name: string; .)
+= "void"
+  Ident<name>                (. tab.OpenScope; .)
+  '{'
+  { VarDecl | ProcDecl }
+  '}'                        (. tab.CloseScope;
+                                if gen.progStart = -1 then
+                                  SemErr('main function never defined'); .)
+.
+
+Term<var typ: TType>         (. var
+                                  typ1: TType;
+                                  op: TOp; .)
+=
+Factor<typ>
+{ MulOp<op>
+Factor<typ1>                 (. if (typ <> TType.int) or (typ1 <> TType.int) then
+                                  SemErr('integer type expected');
+                                gen.Emit(op); .)
+}.
+
+typ<var typ: TType>
+=                            (. typ := TType.undef; .)
+( "int"                      (. typ := TType.int; .)
+| "bool"                     (. typ := TType.bool; .)
+).
+
+VarDecl                      (. var
+                                  name: string;
+                                  typ: TType; .)
+=
+typ<typ>
+Ident<name>                  (. tab.NewObj(name, variable, typ); .)
+{ ',' Ident<name>            (. tab.NewObj(name, variable, typ); .)
+} ';'
+.
+
+END Taste.
+
